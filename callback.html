@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>飞书OAuth回调</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; }
+        .code { background: #f0f0f0; padding: 10px; border-radius: 4px; font-family: monospace; }
+    </style>
+</head>
+<body>
+    <h1>飞书OAuth授权成功</h1>
+    <p>请复制下面的授权码并提供给AI助手：</p>
+    <div class="code" id="authCode">等待授权码...</div>
+
+    <script>
+        // 从URL参数中获取授权码
+        const urlParams = new URLSearchParams(window.location.search);
+        const code = urlParams.get('code');
+
+        if (code) {
+            document.getElementById('authCode').textContent = code;
+        } else {
+            document.getElementById('authCode').textContent = '未找到授权码，请检查URL参数';
+        }
+    </script>
+</body>
+</html>

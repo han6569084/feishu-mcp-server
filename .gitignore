@@ -1,0 +1,6 @@
+node_modules/
+build/
+feishu_log.txt
+user_token.json
+*.log
+.env
