@@ -47,7 +47,7 @@ function extractAccessToken(obj: any): string | undefined {
 // token to create documents directly in the user's personal space.
 let userAccessToken = process.env.FEISHU_USER_TOKEN;
 // Load user token from file if environment variable is not set
-if (!userAccessToken) {
+if (false && !userAccessToken) {
   const loadedToken = loadUserTokenFromFile();
   const loadedAccessToken = extractAccessToken(loadedToken);
   if (loadedAccessToken) {
@@ -56,7 +56,7 @@ if (!userAccessToken) {
 }
 
 // If no user token available, provide manual setup option
-if (!userAccessToken) {
+if (false && !userAccessToken) {
   console.error("No user token found.");
   console.error("Option 1 - OAuth Flow:");
   console.error("Please visit the following URL to authorize:");
@@ -215,6 +215,7 @@ const CreateScheduleSchema = z.object({
 
 const CreateDocumentSchema = z.object({
   title: z.string(),
+  content: z.string().optional().describe("Initial content for the document"),
   folderToken: z.string().optional().describe("The token of the folder where the document will be created"),
   // optional: email of the user who should be the owner / receiver of the notification
   userEmail: z.string().optional().describe("Email of the user to receive the doc and notification"),
@@ -236,6 +237,13 @@ const SetDocumentPermissionSchema = z.object({
 const UpdateDocumentSchema = z.object({
   documentId: z.string(),
   content: z.string(),
+});
+
+const CreateTaskSchema = z.object({
+  summary: z.string(),
+  description: z.string().optional(),
+  dueTime: z.string().optional().describe("ISO 8601 format or timestamp in seconds"),
+  assigneeEmail: z.string().optional().describe("Email of the person to assign the task to"),
 });
 
 const SendMessageSchema = z.object({
@@ -269,11 +277,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "create_document",
-        description: "Create a new Feishu document (Docx)",
+        description: "Create a new Feishu document (Docx) with optional content",
         inputSchema: {
           type: "object",
           properties: {
             title: { type: "string" },
+            content: { type: "string" },
             folderToken: { type: "string" },
           },
           required: ["title"],
@@ -314,6 +323,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             content: { type: "string", description: "The content to add" },
           },
           required: ["documentId", "content"],
+        },
+      },
+      {
+        name: "create_task",
+        description: "Create a new Feishu task (Todo)",
+        inputSchema: {
+          type: "object",
+          properties: {
+            summary: { type: "string" },
+            description: { type: "string" },
+            dueTime: { type: "string", description: "ISO 8601 or timestamp" },
+            assigneeEmail: { type: "string", description: "Assignee email" },
+          },
+          required: ["summary"],
         },
       },
       {
@@ -358,376 +381,413 @@ async function getAccessToken() {
   }
 }
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+async function executeTool(name: string, args: any): Promise<string> {
   const token = await getAccessToken();
-  const { name, arguments: args } = request.params;
+  if (name === "create_task") {
+    const { summary, description, dueTime, assigneeEmail } = CreateTaskSchema.parse(args);
+    const authToken = await getTenantAccessToken();
 
-  try {
-    if (name === "send_message") {
-      const { email, text } = SendMessageSchema.parse(args);
-      const response = await axios.post(
-        "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=email",
-        {
-          receive_id: email,
-          msg_type: "text",
-          content: JSON.stringify({ text }),
-        },
-        {
-          headers: { Authorization: `Bearer ${token}` },
+    const taskData: any = {
+      summary,
+      description,
+      origin: {
+        platform_i18n_name: "{\"zh_cn\":\"MCP助手\",\"en_us\":\"MCP Assistant\"}",
+        href: {
+          url: "https://zepp.feishu.cn",
+          title: "MCP"
         }
-      );
-      return {
-        content: [{ type: "text", text: JSON.stringify(response.data) }],
+      }
+    };
+
+    if (dueTime) {
+      const ts = isNaN(Number(dueTime)) ? Math.floor(new Date(dueTime).getTime() / 1000) : Number(dueTime);
+      taskData.due = {
+        time: ts.toString(),
+        timezone: "Asia/Shanghai",
       };
     }
 
-    if (name === "start_oauth") {
-      const { force } = StartOAuthSchema.parse(args);
-      if (force) {
-        userAccessToken = undefined;
-      }
-      startOauthServerOnce();
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(
-              {
-                authorization_url: buildAuthUrl(),
-                redirect_uri: redirectUri,
-                scope: oauthScope,
-                oauth_listen: { host: oauthHost, port: oauthPort },
-                has_user_token: Boolean(userAccessToken),
-                user_token_path: userTokenPath,
-              },
-              null,
-              2
-            ),
-          },
-        ],
+    if (assigneeEmail) {
+      taskData.assignee = {
+        id: assigneeEmail,
+        id_type: "email",
       };
     }
 
-    if (name === "reset_user_token") {
-      ResetUserTokenSchema.parse(args);
-      try {
-        if (fs.existsSync(userTokenPath)) {
-          fs.unlinkSync(userTokenPath);
-        }
-      } catch (e) {
-        console.error("Failed to delete user token file:", e);
+    const response = await axios.post(
+      "https://open.feishu.cn/open-apis/task/v1/tasks",
+      taskData,
+      {
+        headers: { Authorization: `Bearer ${authToken}` },
       }
+    );
+
+    return JSON.stringify(response.data, null, 2);
+  }
+
+  if (name === "send_message") {
+    const { email, text } = SendMessageSchema.parse(args);
+    const response = await axios.post(
+      "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=email",
+      {
+        receive_id: email,
+        msg_type: "text",
+        content: JSON.stringify({ text }),
+      },
+      {
+        headers: { Authorization: `Bearer ${token}` },
+      }
+    );
+    return JSON.stringify(response.data, null, 2);
+  }
+
+  if (name === "start_oauth") {
+    const { force } = StartOAuthSchema.parse(args);
+    if (force) {
       userAccessToken = undefined;
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(
-              {
-                ok: true,
-                user_token_deleted: true,
-                user_token_path: userTokenPath,
-              },
-              null,
-              2
-            ),
-          },
-        ],
-      };
     }
+    startOauthServerOnce();
+    return JSON.stringify(
+      {
+        authorization_url: buildAuthUrl(),
+        redirect_uri: redirectUri,
+        scope: oauthScope,
+        oauth_listen: { host: oauthHost, port: oauthPort },
+        has_user_token: Boolean(userAccessToken),
+        user_token_path: userTokenPath,
+      },
+      null,
+      2
+    );
+  }
 
-    if (name === "create_schedule") {
-      const { summary, description, startTime, endTime, calendarId } = CreateScheduleSchema.parse(args);
-      
-      // Convert ISO string to Feishu timestamp (seconds)
-      const startTimestamp = Math.floor(new Date(startTime).getTime() / 1000).toString();
-      const endTimestamp = Math.floor(new Date(endTime).getTime() / 1000).toString();
+  if (name === "reset_user_token") {
+    ResetUserTokenSchema.parse(args);
+    try {
+      if (fs.existsSync(userTokenPath)) {
+        fs.unlinkSync(userTokenPath);
+      }
+    } catch (e) {
+      console.error("Failed to delete user token file:", e);
+    }
+    userAccessToken = undefined;
+    return JSON.stringify(
+      {
+        ok: true,
+        user_token_deleted: true,
+        user_token_path: userTokenPath,
+      },
+      null,
+      2
+    );
+  }
 
-      const response = await axios.post(
-        `https://open.feishu.cn/open-apis/calendar/v4/calendars/${calendarId}/events`,
-        {
-          summary,
-          description,
-          start_time: { timestamp: startTimestamp },
-          end_time: { timestamp: endTimestamp },
-        },
-        {
-          headers: { Authorization: `Bearer ${token}` },
+  if (name === "create_schedule") {
+    const { summary, description, startTime, endTime, calendarId } = CreateScheduleSchema.parse(args);
+    
+    // Convert ISO string to Feishu timestamp (seconds)
+    const startTimestamp = Math.floor(new Date(startTime).getTime() / 1000).toString();
+    const endTimestamp = Math.floor(new Date(endTime).getTime() / 1000).toString();
+
+    const response = await axios.post(
+      `https://open.feishu.cn/open-apis/calendar/v4/calendars/${calendarId}/events`,
+      {
+        summary,
+        description,
+        start_time: { timestamp: startTimestamp },
+        end_time: { timestamp: endTimestamp },
+      },
+      {
+        headers: { Authorization: `Bearer ${token}` },
+      }
+    );
+
+    return JSON.stringify(response.data, null, 2);
+  }
+
+  if (name === "create_document") {
+    const { title, content, folderToken, userEmail } = CreateDocumentSchema.parse(args);
+    const authToken = await getTenantAccessToken();
+
+    const response = await axios.post(
+      "https://open.feishu.cn/open-apis/docx/v1/documents",
+      { title, folder_token: folderToken },
+      { headers: { Authorization: `Bearer ${authToken}` } }
+    );
+
+    const docData = response.data?.data || response.data;
+    const documentId = docData?.document_id || docData?.document?.document_id || docData?.document_token || docData?.document?.document_token;
+
+    // Handle initial content if provided
+    if (documentId && content) {
+      try {
+        const headers = { Authorization: `Bearer ${authToken}` };
+        const docResponse = await axios.get(
+          `https://open.feishu.cn/open-apis/docx/v1/documents/${documentId}`,
+          { headers }
+        );
+        const rootBlockId = docResponse.data?.data?.document?.document_id || docResponse.data?.data?.document?.block_id;
+        if (rootBlockId) {
+          await axios.post(
+            `https://open.feishu.cn/open-apis/docx/v1/documents/${documentId}/blocks/${rootBlockId}/children`,
+            {
+              children: [{
+                block_type: 2,
+                text: { elements: [{ text_run: { content } }] }
+              }]
+            },
+            { headers }
+          );
         }
-      );
-
-      return {
-        content: [{ type: "text", text: JSON.stringify(response.data) }],
-      };
+      } catch (appendErr: any) {
+        console.error("Failed to append initial content:", appendErr.response?.data || appendErr.message);
+      }
     }
 
-    if (name === "create_document") {
-      const { title, folderToken, userEmail } = CreateDocumentSchema.parse(args);
-      // Use tenant token by default as requested
-      const authToken = await getTenantAccessToken();
+    const notifyEmail = userEmail || defaultUserEmail;
 
-      const response = await axios.post(
-        "https://open.feishu.cn/open-apis/docx/v1/documents",
-        {
-          title,
-          folder_token: folderToken,
-        },
+    // Standard Automation: Always grant Full Access and Notify
+    if (documentId && notifyEmail) {
+      try {
+        // Use 'full_access' for docx permissions
+        await axios.post(
+          `https://open.feishu.cn/open-apis/drive/v1/permissions/${documentId}/members?type=docx`,
+          {
+            member_type: "email",
+            member_id: notifyEmail,
+            perm: "full_access",
+          },
+          { headers: { Authorization: `Bearer ${authToken}` } }
+        );
+        console.error(`Automated: Granted full_access to ${notifyEmail}`);
+      } catch (permErr: any) {
+        console.error("Automated Permission Failed:", permErr.response?.data || permErr.message);
+      }
+
+      try {
+        const docLink = `https://zepp.feishu.cn/docx/${documentId}`;
+        await axios.post(
+          "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=email",
+          {
+            receive_id: notifyEmail,
+            msg_type: "text",
+            content: JSON.stringify({ text: `📝 新文档已创建：${title}\n链接：${docLink}\n权限：已自动授予管理员` }),
+          },
+          { headers: { Authorization: `Bearer ${authToken}` } }
+        );
+        console.error(`Automated: Sent notification to ${notifyEmail}`);
+      } catch (notifyError: any) {
+        console.error("Automated Notification Failed:", notifyError.response?.data || notifyError.message);
+      }
+    }
+
+    return JSON.stringify(response.data, null, 2);
+  }
+
+  if (name === "create_wiki") {
+    const { title, spaceId, userEmail } = CreateWikiSchema.parse(args);
+
+    // Use tenant token directly for wiki creation
+    const authToken = token;
+
+    // Try to get the app's wiki space first
+    let appSpace;
+    try {
+      const spacesResponse = await axios.get(
+        "https://open.feishu.cn/open-apis/wiki/v2/spaces",
         {
           headers: { Authorization: `Bearer ${authToken}` },
         }
       );
 
-      // Response shape may vary; try different paths
-      const docData = response.data?.data || response.data;
-      const documentId = docData?.document_id || docData?.document?.document_id || docData?.document_token || docData?.document?.document_token;
-
-      const notifyEmail = userEmail || defaultUserEmail;
-
-      // If using user token, document is created in user's personal space with full access
-      // If using tenant token, may need to grant permissions
-      if (!userAccessToken && documentId) {
-        try {
-          await axios.post(
-            `https://open.feishu.cn/open-apis/drive/v1/permissions/${documentId}/members?type=docx`,
-            {
-              member_type: "email",
-              member_id: notifyEmail,
-              perm: "admin",
-            },
-            {
-              headers: { Authorization: `Bearer ${token}` },
-            }
-          );
-          console.error(`Successfully granted admin permission to ${notifyEmail} for document ${documentId}`);
-        } catch (permErr) {
-          console.error("Failed to add permission:", (permErr as any)?.response?.data || permErr);
-        }
-      }
-
-      // Send notification to user with the document link
-      try {
-        const docLink = documentId ? `https://zepp.feishu.cn/docx/${documentId}` : `文档已创建（无可用链接）`;
-        const permissionMsg = userAccessToken ? "（个人空间，全权限访问）" : "权限：管理员";
-        await axios.post(
-          "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=email",
-          {
-            receive_id: notifyEmail,
-            msg_type: "text",
-            content: JSON.stringify({ text: `已为你创建文档：${title}\n链接：${docLink}\n${permissionMsg}` }),
-          },
-          {
-            headers: { Authorization: `Bearer ${token}` },
-          }
-        );
-      } catch (notifyError) {
-        console.error("Failed to send notification:", (notifyError as any)?.response?.data || notifyError);
-      }
-
-      return {
-        content: [{ type: "text", text: JSON.stringify(response.data) }],
-      };
+      const spaces = spacesResponse.data?.data?.spaces || [];
+      appSpace = spaces.find((space: any) => space.name === "应用空间") || spaces[0];
+    } catch (spaceErr) {
+      console.error("Failed to get wiki spaces:", (spaceErr as any)?.response?.data || spaceErr);
     }
 
-    if (name === "create_wiki") {
-      const { title, spaceId, userEmail } = CreateWikiSchema.parse(args);
-
-      // Use tenant token directly for wiki creation
-      const authToken = token;
-
-      // Try to get the app's wiki space first
-      let appSpace;
-      try {
-        const spacesResponse = await axios.get(
-          "https://open.feishu.cn/open-apis/wiki/v2/spaces",
-          {
-            headers: { Authorization: `Bearer ${authToken}` },
-          }
-        );
-
-        const spaces = spacesResponse.data?.data?.spaces || [];
-        appSpace = spaces.find((space: any) => space.name === "应用空间") || spaces[0];
-      } catch (spaceErr) {
-        console.error("Failed to get wiki spaces:", (spaceErr as any)?.response?.data || spaceErr);
-      }
-
-      // If no space found, create a new wiki directly (this might work for some apps)
-      let response;
-      if (appSpace) {
-        response = await axios.post(
-          `https://open.feishu.cn/open-apis/wiki/v2/spaces/${appSpace.space_id}/nodes`,
-          {
-            node_type: "origin",
-            obj_type: "doc",
-            title,
-            parent_node_token: "", // root level
-          },
-          {
-            headers: { Authorization: `Bearer ${authToken}` },
-          }
-        );
-      } else {
-        // Try creating wiki without specifying space (some APIs allow this)
-        response = await axios.post(
-          "https://open.feishu.cn/open-apis/wiki/v2/nodes",
-          {
-            node_type: "origin",
-            obj_type: "doc",
-            title,
-            parent_node_token: "", // root level
-          },
-          {
-            headers: { Authorization: `Bearer ${authToken}` },
-          }
-        );
-      }
-
-      // Response shape may vary; try different paths
-      const wikiData = response.data?.data || response.data;
-      const nodeToken = wikiData?.node?.node_token || wikiData?.node_token;
-
-      // Grant admin permission to the user by making it public
-      const notifyEmail = userEmail || defaultUserEmail;
-      if (nodeToken && appSpace) {
-        try {
-          await axios.patch(
-            `https://open.feishu.cn/open-apis/wiki/v2/spaces/${appSpace.space_id}/nodes/${nodeToken}`,
-            {
-              public_setting: "open", // Make it public so admin can access
-              comment_setting: "allow",
-            },
-            {
-              headers: { Authorization: `Bearer ${token}` },
-            }
-          );
-        } catch (permErr) {
-          console.error("Failed to set wiki permissions:", (permErr as any)?.response?.data || permErr);
-        }
-      }
-
-      // Send notification to user with the wiki link
-      try {
-        const wikiLink = nodeToken ? `https://zepp.feishu.cn/wiki/${nodeToken}` : `Wiki已创建（无可用链接）`;
-        await axios.post(
-          "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=email",
-          {
-            receive_id: notifyEmail,
-            msg_type: "text",
-            content: JSON.stringify({ text: `已为你创建Wiki：${title}\n链接：${wikiLink}\n权限：管理员` }),
-          },
-          {
-            headers: { Authorization: `Bearer ${token}` },
-          }
-        );
-      } catch (notifyError) {
-        console.error("Failed to send notification:", (notifyError as any)?.response?.data || notifyError);
-      }
-
-      return {
-        content: [{ type: "text", text: JSON.stringify(response.data) }],
-      };
-    }
-
-    if (name === "set_document_permission") {
-      const { documentId, email, permission } = SetDocumentPermissionSchema.parse(args);
-      // Use tenant token by default as requested
-      const authToken = await getTenantAccessToken();
-
-      // Map permission to Feishu permission values
-      const permMap: Record<string, string> = {
-        "view": "read",
-        "edit": "write",
-        "admin": "full_access"
-      };
-
-      const feishuPerm = permMap[permission] || "full_access";
-
-      const response = await axios.post(
-        `https://open.feishu.cn/open-apis/drive/v1/permissions/${documentId}/members`,
+    // If no space found, create a new wiki directly (this might work for some apps)
+    let response;
+    if (appSpace) {
+      response = await axios.post(
+        `https://open.feishu.cn/open-apis/wiki/v2/spaces/${appSpace.space_id}/nodes`,
         {
-          member_type: "email",
-          member_id: email,
-          perm: feishuPerm,
+          node_type: "origin",
+          obj_type: "doc",
+          title,
+          parent_node_token: "", // root level
         },
         {
-          headers: {
-            Authorization: `Bearer ${authToken}`,
-            "Content-Type": "application/json"
-          },
+          headers: { Authorization: `Bearer ${authToken}` },
         }
       );
-
-      return {
-        content: [{ type: "text", text: `Successfully set ${permission} permission for ${email} on document ${documentId}` }],
-      };
-    }
-
-    if (name === "update_document") {
-      const { documentId, content } = UpdateDocumentSchema.parse(args);
-      // Use tenant token by default as requested
-      const authToken = await getTenantAccessToken();
-      const headers = { Authorization: `Bearer ${authToken}` };
-
-      const formatAxiosError = (e: any) => {
-        const status = e?.response?.status;
-        const data = e?.response?.data;
-        if (status) {
-          return `status=${status} data=${JSON.stringify(data)}`;
+    } else {
+      // Try creating wiki without specifying space (some APIs allow this)
+      response = await axios.post(
+        "https://open.feishu.cn/open-apis/wiki/v2/nodes",
+        {
+          node_type: "origin",
+          obj_type: "doc",
+          title,
+          parent_node_token: "", // root level
+        },
+        {
+          headers: { Authorization: `Bearer ${authToken}` },
         }
-        return e?.message || String(e);
-      };
+      );
+    }
 
-      // 1) Fetch document to determine root block id
-      let rootBlockId: string | undefined;
+    // Response shape may vary; try different paths
+    const wikiData = response.data?.data || response.data;
+    const nodeToken = wikiData?.node?.node_token || wikiData?.node_token;
+
+    // Grant admin permission to the user by making it public
+    const notifyEmail = userEmail || defaultUserEmail;
+    if (nodeToken && appSpace) {
       try {
-        const docResponse = await axios.get(
-          `https://open.feishu.cn/open-apis/docx/v1/documents/${documentId}`,
-          { headers }
-        );
-
-        rootBlockId =
-          docResponse.data?.data?.document?.document_id ||
-          docResponse.data?.data?.document?.block_id ||
-          docResponse.data?.data?.document?.blocks?.[0]?.block_id;
-      } catch (e) {
-        throw new Error(`Failed to fetch document ${documentId}: ${formatAxiosError(e)}`);
-      }
-
-      if (!rootBlockId) {
-        throw new Error(`Failed to determine root block id for document ${documentId}`);
-      }
-
-      // 2) Append a new text block under root block
-      try {
-        await axios.post(
-          `https://open.feishu.cn/open-apis/docx/v1/documents/${documentId}/blocks/${rootBlockId}/children`,
+        await axios.patch(
+          `https://open.feishu.cn/open-apis/wiki/v2/spaces/${appSpace.space_id}/nodes/${nodeToken}`,
           {
-            children: [
-              {
-                block_type: 2,
-                text: {
-                  elements: [
-                    {
-                      text_run: {
-                        content,
-                      },
-                    },
-                  ],
-                },
-              },
-            ],
+            public_setting: "open", // Make it public so admin can access
+            comment_setting: "allow",
           },
-          { headers }
+          {
+            headers: { Authorization: `Bearer ${token}` },
+          }
         );
-
-        return {
-          content: [{ type: "text", text: `Successfully appended content to document ${documentId}` }],
-        };
-      } catch (e) {
-        throw new Error(`Failed to append content to document ${documentId}: ${formatAxiosError(e)}`);
+      } catch (permErr) {
+        console.error("Failed to set wiki permissions:", (permErr as any)?.response?.data || permErr);
       }
     }
 
-    throw new Error(`Unknown tool: ${name}`);
+    // Send notification to user with the wiki link
+    try {
+      const wikiLink = nodeToken ? `https://zepp.feishu.cn/wiki/${nodeToken}` : `Wiki已创建（无可用链接）`;
+      await axios.post(
+        "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=email",
+        {
+          receive_id: notifyEmail,
+          msg_type: "text",
+          content: JSON.stringify({ text: `已为你创建Wiki：${title}\n链接：${wikiLink}\n权限：管理员` }),
+        },
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
+    } catch (notifyError) {
+      console.error("Failed to send notification:", (notifyError as any)?.response?.data || notifyError);
+    }
+
+    return JSON.stringify(response.data, null, 2);
+  }
+
+  if (name === "set_document_permission") {
+    const { documentId, email, permission } = SetDocumentPermissionSchema.parse(args);
+    // Use tenant token by default as requested
+    const authToken = await getTenantAccessToken();
+
+    // Map permission to Feishu permission values
+    const permMap: Record<string, string> = {
+      "view": "read",
+      "edit": "write",
+      "admin": "full_access"
+    };
+
+    const feishuPerm = permMap[permission] || "full_access";
+
+    const response = await axios.post(
+      `https://open.feishu.cn/open-apis/drive/v1/permissions/${documentId}/members`,
+      {
+        member_type: "email",
+        member_id: email,
+        perm: feishuPerm,
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+          "Content-Type": "application/json"
+        },
+      }
+    );
+
+    return `Successfully set ${permission} permission for ${email} on document ${documentId}`;
+  }
+
+  if (name === "update_document") {
+    const { documentId, content } = UpdateDocumentSchema.parse(args);
+    // Use tenant token by default as requested
+    const authToken = await getTenantAccessToken();
+    const headers = { Authorization: `Bearer ${authToken}` };
+
+    const formatAxiosError = (e: any) => {
+      const status = e?.response?.status;
+      const data = e?.response?.data;
+      if (status) {
+        return `status=${status} data=${JSON.stringify(data)}`;
+      }
+      return e?.message || String(e);
+    };
+
+    // 1) Fetch document to determine root block id
+    let rootBlockId: string | undefined;
+    try {
+      const docResponse = await axios.get(
+        `https://open.feishu.cn/open-apis/docx/v1/documents/${documentId}`,
+        { headers }
+      );
+
+      rootBlockId =
+        docResponse.data?.data?.document?.document_id ||
+        docResponse.data?.data?.document?.block_id ||
+        docResponse.data?.data?.document?.blocks?.[0]?.block_id;
+    } catch (e) {
+      throw new Error(`Failed to fetch document ${documentId}: ${formatAxiosError(e)}`);
+    }
+
+    if (!rootBlockId) {
+      throw new Error(`Failed to determine root block id for document ${documentId}`);
+    }
+
+    // 2) Append a new text block under root block
+    try {
+      await axios.post(
+        `https://open.feishu.cn/open-apis/docx/v1/documents/${documentId}/blocks/${rootBlockId}/children`,
+        {
+          children: [
+            {
+              block_type: 2,
+              text: {
+                elements: [
+                  {
+                    text_run: {
+                      content,
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        { headers }
+      );
+
+      return `Successfully appended content to document ${documentId}`;
+    } catch (e) {
+      throw new Error(`Failed to append content to document ${documentId}: ${formatAxiosError(e)}`);
+    }
+  }
+
+  throw new Error(`Unknown tool: ${name}`);
+}
+
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const { name, arguments: args } = request.params;
+
+  try {
+    const result = await executeTool(name, args);
+    return {
+      content: [{ type: "text", text: result }],
+    };
   } catch (error: any) {
     return {
       isError: true,
@@ -737,6 +797,35 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 });
 
 async function main() {
+  // --- Start CLI Support ---
+  const cliArgs = process.argv.slice(2);
+  if (cliArgs.length > 0) {
+    const [toolName, ...toolParams] = cliArgs;
+    try {
+      let parsedArgs = {};
+      if (toolParams[0]) {
+        try {
+          parsedArgs = JSON.parse(toolParams.join(" "));
+        } catch (e) {
+          toolParams.forEach(arg => {
+            const [k, v] = arg.split("=");
+            if (k && v) (parsedArgs as any)[k] = v;
+          });
+        }
+      }
+      const result = await executeTool(toolName, parsedArgs);
+      console.log(result);
+      process.exit(0);
+    } catch (error: any) {
+      if (error.response?.data) {
+        console.error(`CLI Error Details: ${JSON.stringify(error.response.data)}`);
+      }
+      console.error(`CLI Error: ${error.message}`);
+      process.exit(1);
+    }
+  }
+  // --- End CLI Support ---
+
   const transport = new StdioServerTransport();
 
   // Start Feishu Long Connection (Socket Mode)

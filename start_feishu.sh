@@ -1,8 +1,8 @@
 #!/bin/bash
 # 飞书离线监听启动脚本
 
-export FEISHU_APP_ID="cli_a6b21804b52b500b"
-export FEISHU_APP_SECRET="03QDxSBmkr3CexYkZyDsAEFdfq1itLUh"
+export FEISHU_APP_ID="cli_a9ecb12099fbdcbb"
+export FEISHU_APP_SECRET="lQv032AHmNCKd3nY8MrlQgVbtMl6gIZr"
 export FEISHU_USER_TOKEN="u-ef203d93-146d-4bb1-a67b-402a11b65da9"
 
 SERVER_PATH="/home/hanzj/workspace/mcp_server/feishu-mcp-server/build/index.js"
