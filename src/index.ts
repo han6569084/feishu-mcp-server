@@ -13,6 +13,7 @@ import * as Lark from '@larksuiteoapi/node-sdk';
 // Initialize Feishu configuration
 const appId = process.env.FEISHU_APP_ID;
 const appSecret = process.env.FEISHU_APP_SECRET;
+
 // Optional: default user email (for notifications)
 const defaultUserEmail = process.env.FEISHU_USER_EMAIL || "hanzhijian@zepp.com";
 
@@ -352,6 +353,39 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: "get_user_info",
+        description: "Get user information (including phone number) by email",
+        inputSchema: {
+          type: "object",
+          properties: {
+            email: { type: "string", description: "Email address of the user" },
+          },
+          required: ["email"],
+        },
+      },
+      {
+        name: "list_department_users",
+        description: "List all users in a specific department",
+        inputSchema: {
+          type: "object",
+          properties: {
+            departmentId: { type: "string" },
+          },
+          required: ["departmentId"],
+        },
+      },
+      {
+        name: "search_user",
+        description: "Search for a user by name or query string",
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: { type: "string", description: "Search query (name, email, etc.)" },
+          },
+          required: ["query"],
+        },
+      },
+      {
         name: "start_oauth",
         description: "Start OAuth callback server and return the authorization URL (for user token)",
         inputSchema: {
@@ -436,6 +470,59 @@ async function executeTool(name: string, args: any): Promise<string> {
       },
       {
         headers: { Authorization: `Bearer ${token}` },
+      }
+    );
+    return JSON.stringify(response.data, null, 2);
+  }
+
+  if (name === "get_user_info") {
+    const { email } = z.object({ email: z.string() }).parse(args);
+    const authToken = await getTenantAccessToken();
+    
+    // 1. Get open_id from email
+    const idResp = await axios.post(
+      "https://open.feishu.cn/open-apis/contact/v3/users/batch_get_id?user_id_type=open_id",
+      { emails: [email] },
+      { headers: { Authorization: `Bearer ${authToken}` } }
+    );
+    const openId = idResp.data?.data?.user_list?.[0]?.user_id;
+    if (!openId) {
+      return JSON.stringify({ error: "User not found by email", details: idResp.data }, null, 2);
+    }
+
+    // 2. Get user details using open_id
+    const userResp = await axios.get(
+      `https://open.feishu.cn/open-apis/contact/v3/users/${openId}?user_id_type=open_id`,
+      {
+        headers: { Authorization: `Bearer ${authToken}` },
+      }
+    );
+    return JSON.stringify(userResp.data, null, 2);
+  }
+
+  if (name === "list_department_users") {
+    const { departmentId } = z.object({ departmentId: z.string() }).parse(args);
+    const authToken = await getTenantAccessToken();
+    const response = await axios.get(
+      `https://open.feishu.cn/open-apis/contact/v3/users/find_by_department?department_id=${departmentId}`,
+      {
+        headers: { Authorization: `Bearer ${authToken}` },
+      }
+    );
+    return JSON.stringify(response.data, null, 2);
+  }
+
+  if (name === "search_user") {
+    const { query } = z.object({ query: z.string() }).parse(args);
+    const authToken = await getTenantAccessToken();
+    const response = await axios.get(
+      "https://open.feishu.cn/open-apis/contact/v3/users/search",
+      {
+        params: { 
+          query: query,
+          user_id_type: "open_id" 
+        },
+        headers: { Authorization: `Bearer ${authToken}` },
       }
     );
     return JSON.stringify(response.data, null, 2);
@@ -826,39 +913,129 @@ async function main() {
   }
   // --- End CLI Support ---
 
-  const transport = new StdioServerTransport();
+const transport = new StdioServerTransport();
 
-  // Start Feishu Long Connection (Socket Mode)
-  if (appId && appSecret) {
+// Record server start time to ignore history messages
+const SERVER_START_TIME = Date.now();
+
+// Dedup map to prevent double processing in current session
+const processedMessages = new Set<string>();
+
+// Start Feishu Long Connection (Socket Mode)
+if (appId && appSecret) {
     const eventDispatcher = new Lark.EventDispatcher({}).register({
       'im.message.receive_v1': async (data: any) => {
         const { message } = data;
-        let textContent = "";
-        try {
-          const parsed = JSON.parse(message.content);
-          textContent = parsed.text || "非文本内容";
-        } catch (e) {
-          textContent = message.content;
+        
+        // 1. Ignore old messages (history)
+        const msgCreateTime = parseInt(message.create_time);
+        if (msgCreateTime < SERVER_START_TIME - 5000) { // 5s buffer
+          console.error(`[Event] Ignored old message: ${message.message_id}`);
+          return;
         }
 
-        console.error(`[Event] Received message: ${textContent}`);
+        // 2. Dedup by message_id
+        if (processedMessages.has(message.message_id)) {
+          console.error(`[Event] Duplicate message detected (ID: ${message.message_id}), skipping.`);
+          return;
+        }
+        processedMessages.add(message.message_id);
+        
+        // Limit Set size to prevent memory growth
+        if (processedMessages.size > 1000) {
+          const first = processedMessages.values().next().value;
+          if (first) processedMessages.delete(first);
+        }
 
-        // Auto-reply logic - ALWAYS use tenant token for bot replies
-        try {
+        // 3. Scenario filtering
+        const isP2P = message.chat_type === 'p2p';
+        
+        // Check if Bot or Roger is mentioned
+        const botMention = message.mentions?.find((m: any) => m.name === 'VSCode 助手');
+        const rogerMention = message.mentions?.find((m: any) => m.name.includes('Roger') || m.id === 'ou_376e61b2acf14f6ef1f48095c27139ee');
+
+        if (!isP2P && !botMention && !rogerMention) {
+          return;
+        }
+
+        // Handle Roger's proxy reply (priority)
+        if (rogerMention) {
+          console.error(`[Event] Replying on behalf of Roger for message: ${message.message_id}`);
           const botToken = await getTenantAccessToken();
           await axios.post(
             `https://open.feishu.cn/open-apis/im/v1/messages/${message.message_id}/reply`,
             {
               msg_type: "text",
-              content: JSON.stringify({ text: `🤖 机器人已收到您的消息：${textContent}` }),
+              content: JSON.stringify({ text: "Roger正在Coding...，我是Roger的私人助理，有什么问题可以先和我说。" }),
             },
-            {
-              headers: { Authorization: `Bearer ${botToken}` },
-            }
+            { headers: { Authorization: `Bearer ${botToken}` } }
           );
-          console.error(`[Event] Auto-replied to message ${message.message_id}`);
+          // If ONLY Roger was mentioned, we stop here. 
+          // If BOTH were mentioned, we might want to continue to AI reply, 
+          // but sending two replies to one message is usually not ideal. 
+          // For now, let's stop if Roger is mentioned.
+          return;
+        }
+
+        let textContent = "";
+        try {
+          const parsed = JSON.parse(message.content);
+          textContent = parsed.text || "";
+        } catch (e) {
+          textContent = message.content;
+        }
+
+        // Clean @ mentions
+        if (botMention) {
+          textContent = textContent.replace(/@_user_\w+\s?/g, '').trim();
+          textContent = textContent.replace(/@VSCode 助手\s?/g, '').trim();
+          textContent = textContent.replace(/@Roger HAN 韩志坚\s?/g, '').trim();
+        }
+
+        if (!textContent) return;
+
+        console.error(`[Event] Processing message: ${textContent}`);
+
+        // Use VSCode LLM (MCP Sampling)
+        try {
+          const botToken = await getTenantAccessToken();
+          
+          console.error(`[Event] Sending sampling request to VS Code for: ${textContent}`);
+          const result = await server.createMessage({
+            messages: [
+              {
+                role: "user",
+                content: { type: "text", text: textContent }
+              }
+            ],
+            systemPrompt: "你是一个有用的助手。请简洁地回复用户。",
+            maxTokens: 500,
+          });
+
+          const aiReply = (result.content as any).text || "抱歉，我现在无法回答。";
+
+          await axios.post(
+            `https://open.feishu.cn/open-apis/im/v1/messages/${message.message_id}/reply`,
+            {
+              msg_type: "text",
+              content: JSON.stringify({ text: aiReply }),
+            },
+            { headers: { Authorization: `Bearer ${botToken}` } }
+          );
+          console.error(`[Event] VSCode-LLM-replied to ${message.message_id}`);
         } catch (replyErr: any) {
-          console.error("[Event] Failed to auto-reply:", replyErr.response?.data || replyErr.message);
+          console.error(`[Event] Error: ${replyErr.message}`);
+          if (replyErr.message.includes("timeout")) {
+            const botToken = await getTenantAccessToken();
+            await axios.post(
+              `https://open.feishu.cn/open-apis/im/v1/messages/${message.message_id}/reply`,
+              {
+                msg_type: "text",
+                content: JSON.stringify({ text: "❌ AI 响应超时。请检查 VS Code 底部是否有授权弹窗，或重启 MCP Server。" }),
+              },
+              { headers: { Authorization: `Bearer ${botToken}` } }
+            );
+          }
         }
       },
     });
