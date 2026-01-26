@@ -1,5 +1,6 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { parseMarkdownToBlocks, markdownToFeishuRequestBody } from './markdown-parser.js';
+import { parseMarkdownToBlocks, markdownToFeishuRequestBody } from './markdown-parser.js';
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   CallToolRequestSchema,
@@ -615,27 +616,20 @@ async function executeTool(name: string, args: any): Promise<string> {
           { headers }
         );
         const rootBlockId = docResponse.data?.data?.document?.document_id || docResponse.data?.data?.document?.block_id;
-        console.error("Debug - docResponse:", JSON.stringify(docResponse.data, null, 2));
-        console.error("Debug - rootBlockId:", rootBlockId);
         if (rootBlockId) {
-          // 使用结构化解析器将 Markdown 转换为飞书 Blocks
-          const blocks = parseMarkdownToBlocks(content);
-          console.error("Debug - blocks count:", blocks.length);
-          console.error("Debug - blocks:", JSON.stringify(blocks, null, 2));
-          if (blocks.length > 0) {
-            const response = await axios.post(
-              `https://open.feishu.cn/open-apis/docx/v1/documents/${documentId}/blocks/${rootBlockId}/children`,
-              { children: blocks },
-              { headers }
-            );
-            console.error(`Structured content added: ${blocks.length} blocks`);
-            console.error("Debug - add blocks response:", JSON.stringify(response.data, null, 2));
-          }
+          await axios.post(
+            `https://open.feishu.cn/open-apis/docx/v1/documents/${documentId}/blocks/${rootBlockId}/children`,
+            {
+              children: [{
+                block_type: 2,
+                text: { elements: [{ text_run: { content } }] }
+              }]
+            },
+            { headers }
+          );
         }
       } catch (appendErr: any) {
-        const errDetail = appendErr.response?.data || appendErr.message;
-        console.error("Failed to append initial content:", JSON.stringify(errDetail, null, 2));
-        // 不抛出异常，但在返回中添加警告
+        console.error("Failed to append initial content:", appendErr.response?.data || appendErr.message);
       }
     }
 
@@ -843,20 +837,30 @@ async function executeTool(name: string, args: any): Promise<string> {
       throw new Error(`Failed to determine root block id for document ${documentId}`);
     }
 
-    // 2) Append structured blocks under root block (Markdown -> Feishu Blocks)
+    // 2) Append a new text block under root block
     try {
-      const blocks = parseMarkdownToBlocks(content);
-      if (blocks.length === 0) {
-        return `No content to append to document ${documentId}`;
-      }
-      
       await axios.post(
         `https://open.feishu.cn/open-apis/docx/v1/documents/${documentId}/blocks/${rootBlockId}/children`,
-        { children: blocks },
+        {
+          children: [
+            {
+              block_type: 2,
+              text: {
+                elements: [
+                  {
+                    text_run: {
+                      content,
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
         { headers }
       );
 
-      return `Successfully appended ${blocks.length} structured blocks to document ${documentId}`;
+      return `Successfully appended content to document ${documentId}`;
     } catch (e) {
       throw new Error(`Failed to append content to document ${documentId}: ${formatAxiosError(e)}`);
     }
